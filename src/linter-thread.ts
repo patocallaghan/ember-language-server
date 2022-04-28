@@ -40,9 +40,9 @@ class Linter {
   }
 }
 
-type LintAction = 'vrify' | 'verifyAndFix';
+type LintAction = 'verify' | 'verifyAndFix';
 
-type LinterMessage = { id: string; content: string; uri: string; action: LintAction; projectRoot: string; linterPath: string };
+export type LinterMessage = { id: string; content: string; uri: string; action: LintAction; projectRoot: string; linterPath: string };
 
 const linters: Map<string, typeof Linter> = new Map();
 const instances = new Map<string, Linter>();
@@ -153,6 +153,38 @@ function setCwd(cwd: string) {
   }
 }
 
+async function fixDocument(message: LinterMessage): Promise<[null | Error, { isFixed: boolean; output?: string }]> {
+  try {
+    await linkLinterToProject(message);
+  } catch {
+    return [new Error('Unable to find linter for project'), { isFixed: false }];
+  }
+
+  let linter: Linter | undefined;
+
+  try {
+    linter = await getLinterInstance(message);
+  } catch {
+    return [new Error('Unable to create linter instance'), { isFixed: false }];
+  }
+
+  if (!linter) {
+    return [new Error('Unable resolve linter instance'), { isFixed: false }];
+  }
+
+  try {
+    const { isFixed, output } = await (linter as Linter).verifyAndFix({
+      source: message.content,
+      moduleId: URI.parse(message.uri).fsPath,
+      filePath: URI.parse(message.uri).fsPath,
+    });
+
+    return [null, { isFixed, output: isFixed ? output : '' }];
+  } catch (e) {
+    return [e, { isFixed: false }];
+  }
+}
+
 async function lintDocument(message: LinterMessage): Promise<[null | Error, Diagnostic[]]> {
   try {
     await linkLinterToProject(message);
@@ -208,19 +240,39 @@ async function lintDocument(message: LinterMessage): Promise<[null | Error, Diag
 }
 
 parentPort?.on('message', async (message: LinterMessage) => {
-  try {
-    const [err, diagnostics] = await lintDocument(message);
+  if (message.action === 'verify') {
+    try {
+      const [err, diagnostics] = await lintDocument(message);
 
-    parentPort?.postMessage({
-      id: message.id,
-      error: err,
-      diagnostics,
-    });
-  } catch (e) {
-    parentPort?.postMessage({
-      id: message.id,
-      error: e.message,
-      diagnostics: [],
-    });
+      parentPort?.postMessage({
+        id: message.id,
+        error: err,
+        diagnostics,
+      });
+    } catch (e) {
+      parentPort?.postMessage({
+        id: message.id,
+        error: e.message,
+        diagnostics: [],
+      });
+    }
+  } else if (message.action === 'verifyAndFix') {
+    try {
+      const [err, { isFixed, output }] = await fixDocument(message);
+
+      parentPort?.postMessage({
+        id: message.id,
+        error: err,
+        isFixed,
+        output,
+      });
+    } catch (e) {
+      parentPort?.postMessage({
+        id: message.id,
+        error: e.message,
+        isFixed: false,
+        output: '',
+      });
+    }
   }
 });

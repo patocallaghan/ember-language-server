@@ -6,7 +6,7 @@ import { Worker } from 'worker_threads';
 import Server from './server';
 import { Project } from './project';
 import { getRequireSupport } from './utils/layout-helpers';
-import { extensionsToLint } from './linter-thread';
+import { extensionsToLint, LinterMessage } from './linter-thread';
 
 type FindUp = (name: string, opts: { cwd: string; type: string }) => Promise<string | undefined>;
 
@@ -23,10 +23,28 @@ export interface TemplateLinterError {
   source?: string;
 }
 
-type WorkerMessage = {
+type WorkerLintMessage = {
   id: string;
   error: null | string;
   diagnostics: Diagnostic[];
+};
+
+type WorkerFixMessage = {
+  id: string;
+  error: null | string;
+  output: string;
+  isFixed: boolean;
+};
+
+type WorkerMessage = WorkerFixMessage | WorkerLintMessage;
+
+type FixOutput = { isFixed: boolean; output: string };
+
+type QItem = {
+  id: string;
+  resolve: (value: PromiseLike<Diagnostic[]> | Diagnostic[] | FixOutput | PromiseLike<FixOutput>) => void;
+  reject: (reason: string) => void;
+  tId: number;
 };
 
 export default class TemplateLinter {
@@ -34,6 +52,7 @@ export default class TemplateLinter {
   private _isEnabled = true;
   private _findUp: FindUp;
   private worker: Worker;
+  private _qID = 0;
 
   constructor(private server: Server) {
     if (this.server.options.type === 'worker') {
@@ -41,12 +60,7 @@ export default class TemplateLinter {
     }
   }
 
-  private workerQueue: {
-    id: string;
-    resolve: (value: Diagnostic[]) => void;
-    reject: (reason: string) => void;
-    tId: number;
-  }[] = [];
+  private workerQueue: QItem[] = [];
 
   initWorker() {
     if (this.worker) {
@@ -64,7 +78,11 @@ export default class TemplateLinter {
         if (message.error !== null) {
           q.reject(message.error);
         } else {
-          q.resolve(message.diagnostics);
+          if ('diagnostics' in message) {
+            q.resolve(message.diagnostics);
+          } else if ('output' in message) {
+            q.resolve({ isFixed: message.isFixed, output: message.output });
+          }
         }
       }
     });
@@ -88,6 +106,12 @@ export default class TemplateLinter {
     return this._isEnabled;
   }
 
+  qID() {
+    this._qID++;
+
+    return String(this._qID);
+  }
+
   private getProjectForDocument(textDocument: TextDocument) {
     const ext = getExtension(textDocument);
 
@@ -96,6 +120,46 @@ export default class TemplateLinter {
     }
 
     return this.server.projectRoots.projectForUri(textDocument.uri);
+  }
+
+  async fix(textDocument: TextDocument): Promise<{ isFixed: boolean; output: string } | undefined> {
+    if (this._isEnabled === false) {
+      return;
+    }
+
+    const project = this.getProjectForDocument(textDocument);
+
+    if (!project) {
+      return;
+    }
+
+    const linterPath = await this.getLinter(project);
+
+    if (!linterPath) {
+      return;
+    }
+
+    const p: Promise<FixOutput> = new Promise((resolve, reject) => {
+      const id = this.qID();
+      const ref = { id, resolve, reject, tId: -1 };
+
+      this.addToQueue(ref, () => {
+        const msg: LinterMessage = {
+          id,
+          action: 'verifyAndFix',
+          content: textDocument.getText(),
+          uri: textDocument.uri,
+          projectRoot: project.root,
+          linterPath,
+        };
+
+        return msg;
+      });
+    });
+
+    const { isFixed, output } = await p;
+
+    return { isFixed, output: output ?? '' };
   }
 
   async lint(textDocument: TextDocument): Promise<Diagnostic[] | undefined> {
@@ -109,21 +173,27 @@ export default class TemplateLinter {
       return;
     }
 
+    const linterPath = await this.getLinter(project);
+
+    if (!linterPath) {
+      return;
+    }
+
     const p: Promise<Diagnostic[]> = new Promise((resolve, reject) => {
-      const id = `${project.name}-${textDocument.uri}-${textDocument.version}`;
+      const id = this.qID();
       const ref = { id, resolve, reject, tId: -1 };
 
-      this.workerQueue.push(ref);
+      this.addToQueue(ref, () => {
+        const msg: LinterMessage = {
+          id,
+          action: 'verify',
+          content: textDocument.getText(),
+          uri: textDocument.uri,
+          projectRoot: project.root,
+          linterPath,
+        };
 
-      ref.tId = setTimeout(() => {
-        this.workerQueue = this.workerQueue.filter((q) => q !== ref);
-      }, 10000) as unknown as number;
-
-      this.worker.postMessage({
-        id,
-        source: textDocument.getText(),
-        filePath: textDocument.uri,
-        moduleId: project.name,
+        return msg;
       });
     });
 
@@ -135,6 +205,15 @@ export default class TemplateLinter {
       logDebugInfo(e);
 
       return [];
+    }
+  }
+  addToQueue(q: QItem, fn: () => LinterMessage) {
+    if (this.workerQueue.length < 100) {
+      q.tId = setTimeout(() => {
+        this.workerQueue = this.workerQueue.filter((q) => q !== q);
+      }, 10000) as unknown as number;
+      this.workerQueue.push(q);
+      this.worker.postMessage(fn());
     }
   }
   async getFindUp(): Promise<FindUp> {

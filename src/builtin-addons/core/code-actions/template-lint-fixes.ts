@@ -1,9 +1,9 @@
 import { CodeActionFunctionParams } from '../../../utils/addon-api';
 import { Command, CodeAction, WorkspaceEdit, CodeActionKind, TextEdit, Diagnostic } from 'vscode-languageserver/node';
-import { URI } from 'vscode-uri';
 import { toLSRange } from '../../../estree-utils';
 import BaseCodeActionProvider, { INodeSelectionInfo } from './base';
 import { logError } from '../../../utils/logger';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 
 function setCwd(cwd: string) {
   try {
@@ -29,28 +29,21 @@ export default class TemplateLintFixesCodeAction extends BaseCodeActionProvider 
 
     try {
       setCwd(this.project.root);
-      const linter = new linterKlass();
 
       const fixes = issues.map(async (issue): Promise<null | CodeAction> => {
-        const { output, isFixed } = await Promise.resolve(
-          linter.verifyAndFix({
-            source: meta.selection || '',
-            moduleId: URI.parse(params.textDocument.uri).fsPath,
-            filePath: URI.parse(params.textDocument.uri).fsPath,
-          })
-        );
+        const result = await this.server.templateLinter.fix(TextDocument.create(params.textDocument.uri, 'handlebars', 1, meta.selection || ''));
 
-        if (!isFixed) {
+        if (result && result.isFixed) {
+          const edit: WorkspaceEdit = {
+            changes: {
+              [params.textDocument.uri]: [TextEdit.replace(toLSRange(meta.location), result.output)],
+            },
+          };
+
+          return CodeAction.create(`fix: ${issue.code}`, edit, CodeActionKind.QuickFix);
+        } else {
           return null;
         }
-
-        const edit: WorkspaceEdit = {
-          changes: {
-            [params.textDocument.uri]: [TextEdit.replace(toLSRange(meta.location), output)],
-          },
-        };
-
-        return CodeAction.create(`fix: ${issue.code}`, edit, CodeActionKind.QuickFix);
       });
       const resolvedFixes = await Promise.all(fixes);
 
