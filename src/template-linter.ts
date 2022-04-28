@@ -1,12 +1,13 @@
 import { Diagnostic, Files } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getExtension } from './utils/file-extension';
-import { log, logDebugInfo } from './utils/logger';
+import { log, logError, logInfo } from './utils/logger';
 import { Worker } from 'worker_threads';
 import Server from './server';
 import { Project } from './project';
 import { getRequireSupport } from './utils/layout-helpers';
 import { extensionsToLint, LinterMessage } from './linter-thread';
+import * as path from 'path';
 
 type FindUp = (name: string, opts: { cwd: string; type: string }) => Promise<string | undefined>;
 
@@ -47,35 +48,23 @@ type QItem = {
   tId: number;
 };
 
-export default class TemplateLinter {
-  private _linterCache = new Map<Project, string>();
-  private _isEnabled = true;
-  private _findUp: FindUp;
-  private worker: Worker;
-  private _qID = 0;
+class WorkerWrapper {
+  worker: Worker;
+  queue: QItem[];
+  constructor(worker: Worker) {
+    this.worker = worker;
+    this.queue = [];
+    worker.on('message', (message: WorkerMessage) => {
+      const q = this.queue.find((q) => q.id === message.id);
 
-  constructor(private server: Server) {
-    if (this.server.options.type === 'worker') {
-      this.disable();
-    }
-  }
-
-  private workerQueue: QItem[] = [];
-
-  initWorker() {
-    if (this.worker) {
-      this.workerQueue = [];
-    }
-
-    this.worker = new Worker('./linter-thread.ts');
-    this.worker.on('message', (message: WorkerMessage) => {
-      const q = this.workerQueue.find((q) => q.id === message.id);
+      logInfo(`Message for ${message.id}: ${JSON.stringify(message)}`);
 
       if (q) {
-        this.workerQueue = this.workerQueue.filter((q) => q.id !== message.id);
+        this.queue = this.queue.filter((q) => q.id !== message.id);
         clearTimeout(q.tId);
 
         if (message.error !== null) {
+          logInfo(message.error);
           q.reject(message.error);
         } else {
           if ('diagnostics' in message) {
@@ -86,12 +75,55 @@ export default class TemplateLinter {
         }
       }
     });
-    this.worker.on('error', () => {
-      this.initWorker();
+    worker.on('error', (e) => {
+      logError(e as Error & { stack: string });
     });
-    this.worker.on('exit', () => {
-      this.initWorker();
-    });
+  }
+  addToQueue(q: QItem, fn: () => LinterMessage) {
+    if (this.queue.length < 100) {
+      q.tId = setTimeout(() => {
+        this.queue = this.queue.filter((q) => q !== q);
+        logInfo(`Timeout for ${q.id}`);
+      }, 10000) as unknown as number;
+      this.queue.push(q);
+      logInfo(`Adding to queue ${q.id}`);
+      this.worker.postMessage(fn());
+    }
+  }
+}
+
+export default class TemplateLinter {
+  private _linterCache = new Map<Project, string>();
+  private _isEnabled = true;
+  private _findUp: FindUp;
+  private workers: WeakMap<Project, WorkerWrapper> = new WeakMap();
+  private _qID = 0;
+
+  constructor(private server: Server) {
+    if (this.server.options.type === 'worker') {
+      this.disable();
+    }
+  }
+
+  initWorker(project: Project): WorkerWrapper | undefined {
+    try {
+      if (!this.workers.has(project)) {
+        const worker = new Worker(path.join(__dirname, './linter-thread.js'), {
+          workerData: {
+            cwd: project.root,
+          },
+        });
+        const wrapper = new WorkerWrapper(worker);
+
+        this.workers.set(project, wrapper);
+      }
+
+      return this.workers.get(project);
+    } catch (e) {
+      logError(e);
+
+      return undefined;
+    }
   }
 
   disable() {
@@ -139,11 +171,17 @@ export default class TemplateLinter {
       return;
     }
 
+    const wrapper = await this.initWorker(project);
+
+    if (!wrapper) {
+      return;
+    }
+
     const p: Promise<FixOutput> = new Promise((resolve, reject) => {
       const id = this.qID();
       const ref = { id, resolve, reject, tId: -1 };
 
-      this.addToQueue(ref, () => {
+      wrapper.addToQueue(ref, () => {
         const msg: LinterMessage = {
           id,
           action: 'verifyAndFix',
@@ -179,11 +217,17 @@ export default class TemplateLinter {
       return;
     }
 
+    const wrapper = await this.initWorker(project);
+
+    if (!wrapper) {
+      return;
+    }
+
     const p: Promise<Diagnostic[]> = new Promise((resolve, reject) => {
       const id = this.qID();
       const ref = { id, resolve, reject, tId: -1 };
 
-      this.addToQueue(ref, () => {
+      wrapper.addToQueue(ref, () => {
         const msg: LinterMessage = {
           id,
           action: 'verify',
@@ -202,18 +246,9 @@ export default class TemplateLinter {
 
       return diagnostics;
     } catch (e) {
-      logDebugInfo(e);
+      logInfo(e);
 
       return [];
-    }
-  }
-  addToQueue(q: QItem, fn: () => LinterMessage) {
-    if (this.workerQueue.length < 100) {
-      q.tId = setTimeout(() => {
-        this.workerQueue = this.workerQueue.filter((q) => q !== q);
-      }, 10000) as unknown as number;
-      this.workerQueue.push(q);
-      this.worker.postMessage(fn());
     }
   }
   async getFindUp(): Promise<FindUp> {

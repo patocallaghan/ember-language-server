@@ -2,16 +2,7 @@ import { CodeActionFunctionParams } from '../../../utils/addon-api';
 import { Command, CodeAction, WorkspaceEdit, CodeActionKind, TextEdit, Diagnostic } from 'vscode-languageserver/node';
 import { toLSRange } from '../../../estree-utils';
 import BaseCodeActionProvider, { INodeSelectionInfo } from './base';
-import { logError } from '../../../utils/logger';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-
-function setCwd(cwd: string) {
-  try {
-    process.chdir(cwd);
-  } catch (err) {
-    logError(err);
-  }
-}
 
 export default class TemplateLintFixesCodeAction extends BaseCodeActionProvider {
   async fixTemplateLintIssues(issues: Diagnostic[], params: CodeActionFunctionParams, meta: INodeSelectionInfo): Promise<Array<CodeAction | null>> {
@@ -25,11 +16,7 @@ export default class TemplateLintFixesCodeAction extends BaseCodeActionProvider 
       return [null];
     }
 
-    const cwd = process.cwd();
-
     try {
-      setCwd(this.project.root);
-
       const fixes = issues.map(async (issue): Promise<null | CodeAction> => {
         const result = await this.server.templateLinter.fix(TextDocument.create(params.textDocument.uri, 'handlebars', 1, meta.selection || ''));
 
@@ -50,8 +37,6 @@ export default class TemplateLintFixesCodeAction extends BaseCodeActionProvider 
       return resolvedFixes;
     } catch (e) {
       return [];
-    } finally {
-      setCwd(cwd);
     }
   }
   public async onCodeAction(_: string, params: CodeActionFunctionParams): Promise<(Command | CodeAction)[] | undefined | null> {

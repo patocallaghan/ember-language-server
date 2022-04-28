@@ -127,30 +127,16 @@ async function getLinterInstance(msg: LinterMessage) {
       const LinterKlass = linters.get(msg.projectRoot);
 
       if (LinterKlass) {
-        const cwd = process.cwd();
-
-        setCwd(msg.projectRoot);
-
         try {
           instances.set(msg.projectRoot, new LinterKlass());
         } catch (e) {
           // EOL
         }
-
-        setCwd(cwd);
       }
     }
   }
 
   return instances.get(msg.projectRoot);
-}
-
-function setCwd(cwd: string) {
-  try {
-    process.chdir(cwd);
-  } catch (err) {
-    // EOL
-  }
 }
 
 async function fixDocument(message: LinterMessage): Promise<[null | Error, { isFixed: boolean; output?: string }]> {
@@ -217,13 +203,11 @@ async function lintDocument(message: LinterMessage): Promise<[null | Error, Diag
   try {
     const results = await Promise.all(
       sources.map(async (source) => {
-        const errors = await Promise.resolve(
-          (linter as Linter).verify({
-            source,
-            moduleId: URI.parse(message.uri).fsPath,
-            filePath: URI.parse(message.uri).fsPath,
-          })
-        );
+        const errors = await (linter as Linter).verify({
+          source,
+          moduleId: URI.parse(message.uri).fsPath,
+          filePath: URI.parse(message.uri).fsPath,
+        });
 
         return errors.map((error: TemplateLinterError) => toDiagnostic(source, error));
       })
@@ -252,7 +236,7 @@ parentPort?.on('message', async (message: LinterMessage) => {
     } catch (e) {
       parentPort?.postMessage({
         id: message.id,
-        error: e.message,
+        error: e,
         diagnostics: [],
       });
     }
@@ -269,7 +253,7 @@ parentPort?.on('message', async (message: LinterMessage) => {
     } catch (e) {
       parentPort?.postMessage({
         id: message.id,
-        error: e.message,
+        error: e,
         isFixed: false,
         output: '',
       });
