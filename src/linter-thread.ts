@@ -45,7 +45,6 @@ type LintAction = 'verify' | 'verifyAndFix';
 export type LinterMessage = { id: string; content: string; uri: string; action: LintAction; projectRoot: string; linterPath: string };
 
 const linters: Map<string, typeof Linter> = new Map();
-const instances = new Map<string, Linter>();
 
 export const extensionsToLint: string[] = ['.hbs', '.js', '.ts', '.gts', '.gjs'];
 
@@ -122,21 +121,9 @@ async function linkLinterToProject(msg: LinterMessage) {
 }
 
 async function getLinterInstance(msg: LinterMessage) {
-  if (!instances.has(msg.projectRoot)) {
-    if (linters.has(msg.projectRoot)) {
-      const LinterKlass = linters.get(msg.projectRoot);
+  const LinterKlass = linters.get(msg.projectRoot);
 
-      if (LinterKlass) {
-        try {
-          instances.set(msg.projectRoot, new LinterKlass());
-        } catch (e) {
-          // EOL
-        }
-      }
-    }
-  }
-
-  return instances.get(msg.projectRoot);
+  return LinterKlass ? new LinterKlass() : undefined;
 }
 
 async function fixDocument(message: LinterMessage): Promise<[null | Error, { isFixed: boolean; output?: string }]> {

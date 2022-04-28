@@ -11,19 +11,6 @@ import * as path from 'path';
 
 type FindUp = (name: string, opts: { cwd: string; type: string }) => Promise<string | undefined>;
 
-export interface TemplateLinterError {
-  fatal?: boolean;
-  moduleId: string;
-  rule?: string;
-  filePath: string;
-  severity: number;
-  message: string;
-  isFixable?: boolean;
-  line?: number;
-  column?: number;
-  source?: string;
-}
-
 type WorkerLintMessage = {
   id: string;
   error: null | string;
